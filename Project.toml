@@ -1,0 +1,13 @@
+name = "Sentry"
+uuid = "22473447-a6cd-4572-bdc6-902d1f188b6a"
+authors = ["Randall Boyes <33524191+rdboyes@users.noreply.github.com> and contributors"]
+version = "1.0.0-DEV"
+
+[compat]
+julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
