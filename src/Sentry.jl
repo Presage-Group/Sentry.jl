@@ -25,15 +25,15 @@ export capture_message,
     Info,
     Warn,
     Error,
-    sentry_init
+    init
 
-function sentry_init(dsn=nothing ; traces_sample_rate=nothing, traces_sampler=nothing, debug=false, release=nothing)
+function init(dsn=nothing ; traces_sample_rate=nothing, traces_sampler=nothing, debug=false, release=nothing)
     main_hub.initialised && @warn "Sentry already initialised."
     if dsn === nothing
         dsn = get(ENV, "SENTRY_DSN", nothing)
         if dsn === nothing
             # Abort - pretend nothing happened
-            @warn "No DSN for SentryIntegration"
+            @warn "No DSN for Sentry.jl"
             return
         end
     end
@@ -239,7 +239,7 @@ function send_envelope(task::TaskPayload)
     headers = ["Content-Type" => "application/x-sentry-envelope",
                "content-encoding" => "gzip",
                "User-Agent" => "Sentry.jl/$VERSION",
-               "X-Sentry-Auth" => "Sentry sentry_version=7, sentry_client=SentryIntegration.jl/$VERSION, sentry_timestamp=$(nowstr()), sentry_key=$(main_hub.public_key)"
+               "X-Sentry-Auth" => "Sentry sentry_version=7, sentry_client=Sentry.jl/$VERSION, sentry_timestamp=$(nowstr()), sentry_key=$(main_hub.public_key)"
                ]
 
     buf = PipeBuffer()
