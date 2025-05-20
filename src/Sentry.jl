@@ -97,7 +97,7 @@ end
 #----------------------------
 
 # Need to have an extra Z at the end - this indicates UTC
-nowstr() = string(now(UTC)) * "Z"
+nowstr() = string(now(UTC)) * "Z" # COV_EXCL_LINE
 
 # Useful util
 macro ignore_exception(ex)
