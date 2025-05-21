@@ -13,5 +13,5 @@ Sentry.init()
     @test_warn "A 'release' tag is ignored by sentry upstream. You should instead set the release in the `init` call" set_tag("release", "v1.0")
     @test Sentry.global_tags["release"] == "v1.0"
 
-    @test length(generate_uuid4()) == 32
+    @test length(Sentry.generate_uuid4()) == 32
 end
