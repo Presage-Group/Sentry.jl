@@ -1,7 +1,7 @@
 name = "Sentry"
 uuid = "22473447-a6cd-4572-bdc6-902d1f188b6a"
 authors = ["Randall Boyes <33524191+rdboyes@users.noreply.github.com> and contributors"]
-version = "0.2.0"
+version = "0.2.1"
 
 [deps]
 CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"

@@ -62,7 +62,7 @@ function init(dsn=nothing ; traces_sample_rate=nothing, traces_sampler=nothing, 
         main_hub.traces_sampler = NoSamples()
     end
 
-    main_hub.sender_task = @sync send_worker()
+    main_hub.sender_task = @async send_worker()
     bind(main_hub.queued_tasks, main_hub.sender_task)
     main_hub.initialised = true
 
