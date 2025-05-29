@@ -14,4 +14,8 @@ Sentry.init()
     @test Sentry.global_tags["release"] == "v1.0"
 
     @test length(Sentry.generate_uuid4()) == 32
+
+    d = Sentry.FilterNothings([1, nothing, 2])
+    @test d[3] == 2
+    @test d[1] == 1
 end

@@ -262,15 +262,12 @@ function send_envelope(task::TaskPayload)
         return
     end
     r = HTTP.request("POST", target, headers, body)
-    if r.status == 429
-        # TODO:
-    elseif r.status == 200
-        # TODO:
-        r.body
+    if r.status == 200
+        return r.body
     else
-        error("Unknown status $(r.status)")
+        throw(HTTP.Exceptions.StatusError(r.status, "POST", target, r))
     end
-    nothing
+    return nothing
 end
 
 function send_worker()
