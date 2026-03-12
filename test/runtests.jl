@@ -18,9 +18,4 @@ Sentry.init()
     d = Sentry.FilterNothings([1, nothing, 2])
     @test d[3] == 2
     @test d[1] == 1
-
-    # test that a RatioSampler object can only be made with a value between 0 and 1 AI!
-
-    // AI
-
 end
