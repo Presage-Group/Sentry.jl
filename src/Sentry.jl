@@ -28,7 +28,11 @@ export capture_message,
     init
 
 function init(dsn=nothing ; traces_sample_rate=nothing, traces_sampler=nothing, debug=false, release=nothing)
-    main_hub.initialised && @warn "Sentry already initialised."
+    if main_hub.initialised
+        # Returning early, otherwise we would leak another send_worker task.
+        @warn "Sentry already initialised."
+        return nothing
+    end
     if dsn === nothing
         dsn = get(ENV, "SENTRY_DSN", nothing)
         if dsn === nothing
@@ -38,9 +42,7 @@ function init(dsn=nothing ; traces_sample_rate=nothing, traces_sampler=nothing, 
         end
     end
 
-    if !main_hub.initialised
-        atexit(clear_queue)
-    end
+    atexit(clear_queue)
 
 
     main_hub.debug = debug
@@ -158,10 +160,12 @@ function PrepareBody(event::Event, buf)
     println(buf, JSON.json(item_header))
     println(buf, item_str)
 
-    for attachment in event.attachments
+    for (i, attachment) in enumerate(event.attachments)
         attachment_str = JSON.json((;data=attachment))
+        # `filename` is required by sentry for attachment items.
         attachment_header = (; type="attachment",
                              length=sizeof(attachment_str),
+                             filename="attachment-$i.json",
                              content_type="application/json")
 
         println(buf, JSON.json(attachment_header))
@@ -214,6 +218,7 @@ function PrepareBody(transaction::Transaction, buf)
             # root_span...,
             root_span.start_timestamp,
             root_span.timestamp,
+            main_hub.release,
             tags = MergeTags(global_tags, root_span.tags),
 
             contexts = (; trace),
@@ -223,7 +228,7 @@ function PrepareBody(transaction::Transaction, buf)
 
     item_header = (; type="transaction",
                    content_type="application/json",
-                   length=sizeof(item_str)+1) # +1 for the newline to come
+                   length=sizeof(item_str))
 
 
     println(buf, JSON.json(envelope_header))
@@ -254,7 +259,7 @@ function send_envelope(task::TaskPayload)
     if main_hub.dsn === "fake"
         body = String(transcode(CodecZlib.GzipDecompressor, body))
         lines = map(eachline(IOBuffer(body))) do line
-            line = JSON.Parser.parse(line)
+            line = JSON.parse(line)
             line = JSON.json(line, 4)
         end
         @info "Would have sent this body"
@@ -323,7 +328,7 @@ end
 
 # This assumes that we are calling from within a catch
 capture_exception(exc::Exception) = capture_exception([(exc, catch_backtrace())])
-function capture_exception(exceptions=catch_stack())
+function capture_exception(exceptions=Base.current_exceptions())
     main_hub.initialised || return
 
     formatted_excs = map(exceptions) do (exc,strace)
