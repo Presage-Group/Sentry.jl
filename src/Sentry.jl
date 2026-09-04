@@ -27,7 +27,7 @@ export capture_message,
     Error,
     init
 
-function init(dsn=nothing ; traces_sample_rate=nothing, traces_sampler=nothing, debug=false, release=nothing)
+function init(dsn=nothing ; traces_sample_rate=nothing, traces_sampler=nothing, debug=false, release=nothing, shutdown_timeout=DEFAULT_SHUTDOWN_TIMEOUT)
     if main_hub.initialised
         # Returning early, otherwise we would leak another send_worker task.
         @warn "Sentry already initialised."
@@ -42,10 +42,8 @@ function init(dsn=nothing ; traces_sample_rate=nothing, traces_sampler=nothing, 
         end
     end
 
-    atexit(clear_queue)
-
-
     main_hub.debug = debug
+    main_hub.shutdown_timeout = shutdown_timeout
     main_hub.dsn = dsn
 
     upstream, project_id, public_key = parse_dsn(dsn)
@@ -64,7 +62,8 @@ function init(dsn=nothing ; traces_sample_rate=nothing, traces_sampler=nothing, 
         main_hub.traces_sampler = NoSamples()
     end
 
-    main_hub.sender_task = @async send_worker()
+    main_hub.sender_task = Threads.@spawn send_worker()
+    atexit(clear_queue)
     bind(main_hub.queued_tasks, main_hub.sender_task)
     main_hub.initialised = true
 
@@ -276,10 +275,11 @@ function send_envelope(task::TaskPayload)
 end
 
 function send_worker()
-    while true
+    # Iterating the channel drains whatever is still buffered once it has been
+    # closed, and then finishes, which is what lets clear_queue wait for the
+    # sends themselves to complete rather than just for the queue to empty.
+    for event in main_hub.queued_tasks
         try
-            event = take!(main_hub.queued_tasks)
-            yield()
             send_envelope(event)
         catch exc
             if main_hub.debug
@@ -291,10 +291,9 @@ function send_worker()
 end
 
 function clear_queue()
-    while isready(main_hub.queued_tasks)
-        @info "Waiting for queue to finish before closing"
-        # send_envelope(take!(main_hub.queued_tasks))
-        sleep(1)
+    close(main_hub.queued_tasks)
+    if timedwait(() -> istaskdone(main_hub.sender_task), main_hub.shutdown_timeout) === :timed_out
+        @warn "Timed out sending queued events to sentry"
     end
 end
 
@@ -305,7 +304,19 @@ end
 function capture_event(task::TaskPayload)
     main_hub.initialised || return
 
-    push!(main_hub.queued_tasks, task)
+    try
+        push!(main_hub.queued_tasks, task)
+    catch exc
+        if !(exc isa InvalidStateException)
+            rethrow()
+        end
+
+        # The queue is closed while shutting down, so there is nothing left to
+        # send it to. Never let that propagate into the calling program.
+        if main_hub.debug
+            @error "Could not queue an event for sentry" exc
+        end
+    end
 end
 
 function capture_message(message, level::LogLevel=Info ; kwds...)

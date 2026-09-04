@@ -7,14 +7,21 @@ using JSON
 
 # Collects the envelopes that Sentry.jl would have sent to a real sentry server.
 const received = Channel{String}(16)
+
+# Delays the response, to emulate a sentry server that is slower than the local
+# one. Nothing is recorded if the client gives up in the meantime.
+const response_delay = Ref(0.0)
+
 const server = HTTP.serve!("127.0.0.1", 0; listenany=true) do request
+    sleep(response_delay[])
     put!(received, String(transcode(GzipDecompressor, Vector{UInt8}(request.body))))
     HTTP.Response(200, "ok")
 end
 
 Sentry.init("http://abcdef1234567890@127.0.0.1:$(HTTP.port(server))/42";
             traces_sample_rate=1.0,
-            release="v1.2.3")
+            release="v1.2.3",
+            shutdown_timeout=20.0)
 
 """
 Wait for the next envelope and split it into its headers and payloads.
@@ -43,6 +50,9 @@ end
     @test Sentry.global_tags["release"] == "v1.0"
 
     @test length(Sentry.generate_uuid4()) == 32
+
+    @test Sentry.main_hub.shutdown_timeout == 20.0
+    @test Sentry.Hub().shutdown_timeout == Sentry.DEFAULT_SHUTDOWN_TIMEOUT
 
     d = Sentry.FilterNothings([1, nothing, 2])
     @test d[3] == 2
@@ -137,6 +147,30 @@ end
 
         parsed, _ = next_envelope()
         @test parsed[3]["transaction"] == "after"
+    end
+
+    @testset "flushing on exit" begin
+        # Needs a real process exit to run the atexit handler, and deliberately
+        # does not wait for the send itself. The response is delayed so that
+        # just emptying the queue is not enough to get the event through.
+        code = """
+            using Sentry
+            Sentry.init("http://abcdef1234567890@127.0.0.1:$(HTTP.port(server))/42")
+            capture_message("sent while exiting")
+            """
+
+        response_delay[] = 3.0
+        try
+            elapsed = @elapsed run(`$(Base.julia_cmd()) --project=$(Base.active_project()) --eval $code`)
+
+            # Exiting has to block until the send itself came back
+            @test elapsed > response_delay[]
+
+            parsed, _ = next_envelope()
+            @test parsed[3]["message"]["formatted"] == "sent while exiting"
+        finally
+            response_delay[] = 0.0
+        end
     end
 
     @testset "fake dsn" begin
