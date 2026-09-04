@@ -268,9 +268,9 @@ function send_envelope(task::TaskPayload)
     end
     r = HTTP.request("POST", target, headers, body)
     if r.status == 200
-        return r.body
+        return Vector{UInt8}(r.body)
     else
-        throw(HTTP.Exceptions.StatusError(r.status, "POST", target, r))
+        throw(HTTP.Exceptions.StatusError(r.status, r))
     end
     return nothing
 end

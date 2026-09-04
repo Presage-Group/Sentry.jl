@@ -8,7 +8,7 @@ using JSON
 # Collects the envelopes that Sentry.jl would have sent to a real sentry server.
 const received = Channel{String}(16)
 const server = HTTP.serve!("127.0.0.1", 0; listenany=true) do request
-    put!(received, String(transcode(GzipDecompressor, request.body)))
+    put!(received, String(transcode(GzipDecompressor, Vector{UInt8}(request.body))))
     HTTP.Response(200, "ok")
 end
 
