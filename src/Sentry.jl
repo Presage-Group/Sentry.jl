@@ -27,8 +27,12 @@ export capture_message,
     Error,
     init
 
-function init(dsn=nothing ; traces_sample_rate=nothing, traces_sampler=nothing, debug=false, release=nothing)
-    main_hub.initialised && @warn "Sentry already initialised."
+function init(dsn=nothing ; traces_sample_rate=nothing, traces_sampler=nothing, debug=false, release=nothing, shutdown_timeout=DEFAULT_SHUTDOWN_TIMEOUT)
+    if main_hub.initialised
+        # Returning early, otherwise we would leak another send_worker task.
+        @warn "Sentry already initialised."
+        return nothing
+    end
     if dsn === nothing
         dsn = get(ENV, "SENTRY_DSN", nothing)
         if dsn === nothing
@@ -38,12 +42,8 @@ function init(dsn=nothing ; traces_sample_rate=nothing, traces_sampler=nothing, 
         end
     end
 
-    if !main_hub.initialised
-        atexit(clear_queue)
-    end
-
-
     main_hub.debug = debug
+    main_hub.shutdown_timeout = shutdown_timeout
     main_hub.dsn = dsn
 
     upstream, project_id, public_key = parse_dsn(dsn)
@@ -62,7 +62,8 @@ function init(dsn=nothing ; traces_sample_rate=nothing, traces_sampler=nothing, 
         main_hub.traces_sampler = NoSamples()
     end
 
-    main_hub.sender_task = @async send_worker()
+    main_hub.sender_task = Threads.@spawn send_worker()
+    atexit(clear_queue)
     bind(main_hub.queued_tasks, main_hub.sender_task)
     main_hub.initialised = true
 
@@ -158,10 +159,12 @@ function PrepareBody(event::Event, buf)
     println(buf, JSON.json(item_header))
     println(buf, item_str)
 
-    for attachment in event.attachments
+    for (i, attachment) in enumerate(event.attachments)
         attachment_str = JSON.json((;data=attachment))
+        # `filename` is required by sentry for attachment items.
         attachment_header = (; type="attachment",
                              length=sizeof(attachment_str),
+                             filename="attachment-$i.json",
                              content_type="application/json")
 
         println(buf, JSON.json(attachment_header))
@@ -214,6 +217,7 @@ function PrepareBody(transaction::Transaction, buf)
             # root_span...,
             root_span.start_timestamp,
             root_span.timestamp,
+            main_hub.release,
             tags = MergeTags(global_tags, root_span.tags),
 
             contexts = (; trace),
@@ -223,7 +227,7 @@ function PrepareBody(transaction::Transaction, buf)
 
     item_header = (; type="transaction",
                    content_type="application/json",
-                   length=sizeof(item_str)+1) # +1 for the newline to come
+                   length=sizeof(item_str))
 
 
     println(buf, JSON.json(envelope_header))
@@ -254,7 +258,7 @@ function send_envelope(task::TaskPayload)
     if main_hub.dsn === "fake"
         body = String(transcode(CodecZlib.GzipDecompressor, body))
         lines = map(eachline(IOBuffer(body))) do line
-            line = JSON.Parser.parse(line)
+            line = JSON.parse(line)
             line = JSON.json(line, 4)
         end
         @info "Would have sent this body"
@@ -263,18 +267,19 @@ function send_envelope(task::TaskPayload)
     end
     r = HTTP.request("POST", target, headers, body)
     if r.status == 200
-        return r.body
+        return Vector{UInt8}(r.body)
     else
-        throw(HTTP.Exceptions.StatusError(r.status, "POST", target, r))
+        throw(HTTP.Exceptions.StatusError(r.status, r))
     end
     return nothing
 end
 
 function send_worker()
-    while true
+    # Iterating the channel drains whatever is still buffered once it has been
+    # closed, and then finishes, which is what lets clear_queue wait for the
+    # sends themselves to complete rather than just for the queue to empty.
+    for event in main_hub.queued_tasks
         try
-            event = take!(main_hub.queued_tasks)
-            yield()
             send_envelope(event)
         catch exc
             if main_hub.debug
@@ -286,10 +291,9 @@ function send_worker()
 end
 
 function clear_queue()
-    while isready(main_hub.queued_tasks)
-        @info "Waiting for queue to finish before closing"
-        # send_envelope(take!(main_hub.queued_tasks))
-        sleep(1)
+    close(main_hub.queued_tasks)
+    if timedwait(() -> istaskdone(main_hub.sender_task), main_hub.shutdown_timeout) === :timed_out
+        @warn "Timed out sending queued events to sentry"
     end
 end
 
@@ -300,7 +304,19 @@ end
 function capture_event(task::TaskPayload)
     main_hub.initialised || return
 
-    push!(main_hub.queued_tasks, task)
+    try
+        push!(main_hub.queued_tasks, task)
+    catch exc
+        if !(exc isa InvalidStateException)
+            rethrow()
+        end
+
+        # The queue is closed while shutting down, so there is nothing left to
+        # send it to. Never let that propagate into the calling program.
+        if main_hub.debug
+            @error "Could not queue an event for sentry" exc
+        end
+    end
 end
 
 function capture_message(message, level::LogLevel=Info ; kwds...)
@@ -323,7 +339,7 @@ end
 
 # This assumes that we are calling from within a catch
 capture_exception(exc::Exception) = capture_exception([(exc, catch_backtrace())])
-function capture_exception(exceptions=catch_stack())
+function capture_exception(exceptions=Base.current_exceptions())
     main_hub.initialised || return
 
     formatted_excs = map(exceptions) do (exc,strace)
