@@ -53,6 +53,10 @@ sample(sampler::RatioSampler) = rand() < sampler.ratio
 sample(sampler::Function) = sampler()
 
 const TaskPayload = Union{Event,Transaction}
+
+# Seconds to wait for queued events to be sent while the program is exiting
+const DEFAULT_SHUTDOWN_TIMEOUT = 10.0
+
 # This is to supposedly support the "unified api" of the sentry sdk. I'm not a
 # fan, so it will only go partway to this goal.
 # Note: a proper implementation here would make Hub a module.
@@ -68,6 +72,7 @@ Base.@kwdef mutable struct Hub
     release::Union{Nothing,String} = nothing
 
     debug::Bool = false
+    shutdown_timeout::Float64 = DEFAULT_SHUTDOWN_TIMEOUT
 
     last_send_time = nothing
     queued_tasks = Channel{TaskPayload}(100)

@@ -3,7 +3,13 @@
 # * Transactions
 #----------------------------
 
-struct InhibitTransaction end
+# Mimics a transaction, so that it is cleared from the task local storage once
+# the outermost inhibited transaction finishes. Otherwise a single declined
+# sample would lock out tracing for the remaining life of the task.
+mutable struct InhibitTransaction
+    num_open_spans::Int
+end
+InhibitTransaction() = InhibitTransaction(0)
 
 function start_transaction(func ; kwds...)
     previous = get(task_local_storage(), :sentry_transaction, nothing)
@@ -20,7 +26,7 @@ function start_transaction(; name="", force_new=(name!=""), trace_id=:auto, pare
     # trace_id === nothing && return nothing
     # Need to pass through nothings so that we can hit an InhibitTransaction
     t = get_transaction(; name, trace_id, force_new)
-    if t === nothing || t === InhibitTransaction()
+    if t === nothing || t isa InhibitTransaction
         return t
     end
 
@@ -45,7 +51,13 @@ function finish_transaction(current, previous)
     task_local_storage(:sentry_transaction, previous)
 end
 finish_transaction(::Nothing) = nothing
-finish_transaction(::InhibitTransaction) = nothing
+function finish_transaction(inhibit::InhibitTransaction)
+    inhibit.num_open_spans -= 1
+    if inhibit.num_open_spans <= 0
+        task_local_storage(:sentry_transaction, nothing)
+    end
+    nothing
+end
 function finish_transaction((transaction, parent_span, span))
     complete(span)
     if transaction.root_span !== span
@@ -70,11 +82,12 @@ function get_transaction(; force_new=false, trace_id=:auto, kwds...)
         transaction = get(task_local_storage(), :sentry_transaction, nothing)
     end
 
-    if transaction === InhibitTransaction()
+    if transaction isa InhibitTransaction
+        transaction.num_open_spans += 1
         return transaction
     elseif transaction === nothing
         if trace_id === nothing
-            transaction = InhibitTransaction()
+            transaction = InhibitTransaction(1)
             task_local_storage(:sentry_transaction, transaction)
             return transaction
         elseif sample(main_hub.traces_sampler)
@@ -83,15 +96,10 @@ function get_transaction(; force_new=false, trace_id=:auto, kwds...)
             end
             transaction = Transaction(; trace_id = trace_id, kwds...)
         else
-            transaction = InhibitTransaction()
+            transaction = InhibitTransaction(1)
             task_local_storage(:sentry_transaction, transaction)
             return transaction
         end
-        # TODO: Note that the cases which store an InhibitTransaction in here
-        # are bad. They will lock out the start_transaction context manager from
-        # taking effect in any future cases. Instead, we should track this and
-        # later undo its effects once the outermost transaction is completed
-        # (meaning the InhibitTransaction itself should mimic a transaction).
         task_local_storage(:sentry_transaction, transaction)
         return (; transaction, parent_span=nothing)
     else
@@ -106,7 +114,9 @@ end
 
 set_task_transaction(::Nothing) = nothing
 function set_task_transaction(::InhibitTransaction)
-    task_local_storage(:sentry_transaction, InhibitTransaction())
+    # Starts at 1 with no matching finish, so that the parent's sampling
+    # decision holds for the whole life of this task.
+    task_local_storage(:sentry_transaction, InhibitTransaction(1))
 end
 function set_task_transaction((transaction, ignored, parent_span))
     task_local_storage(:sentry_transaction, transaction)
