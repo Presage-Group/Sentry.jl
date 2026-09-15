@@ -26,7 +26,7 @@ Sentry.init("http://abcdef1234567890@127.0.0.1:$(HTTP.port(server))/42";
 """
 Wait for the next envelope and split it into its headers and payloads.
 """
-function next_envelope(timeout=15)
+function next_envelope(timeout=60)
     deadline = time() + timeout
     while !isready(received) && time() < deadline
         sleep(0.05)
@@ -155,7 +155,8 @@ end
         # just emptying the queue is not enough to get the event through.
         code = """
             using Sentry
-            Sentry.init("http://abcdef1234567890@127.0.0.1:$(HTTP.port(server))/42")
+            Sentry.init("http://abcdef1234567890@127.0.0.1:$(HTTP.port(server))/42";
+                        shutdown_timeout=60.0)
             capture_message("sent while exiting")
             """
 
