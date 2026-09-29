@@ -28,8 +28,12 @@ export capture_message,
     Error,
     init
 
-function init(dsn=nothing ; traces_sample_rate=nothing, traces_sampler=nothing, debug=false, release=nothing)
-    main_hub.initialised && @warn "Sentry already initialised."
+function init(dsn=nothing ; traces_sample_rate=nothing, traces_sampler=nothing, debug=false, release=nothing, shutdown_timeout=DEFAULT_SHUTDOWN_TIMEOUT)
+    if main_hub.initialised
+        # Returning early, otherwise we would leak another send_worker task.
+        @warn "Sentry already initialised."
+        return nothing
+    end
     if dsn === nothing
         dsn = get(ENV, "SENTRY_DSN", nothing)
         if dsn === nothing
@@ -39,12 +43,8 @@ function init(dsn=nothing ; traces_sample_rate=nothing, traces_sampler=nothing, 
         end
     end
 
-    if !main_hub.initialised
-        atexit(clear_queue)
-    end
-
-
     main_hub.debug = debug
+    main_hub.shutdown_timeout = shutdown_timeout
     main_hub.dsn = dsn
 
     upstream, project_id, public_key = parse_dsn(dsn)
@@ -63,11 +63,20 @@ function init(dsn=nothing ; traces_sample_rate=nothing, traces_sampler=nothing, 
         main_hub.traces_sampler = NoSamples()
     end
 
-    main_hub.sender_task = @async send_worker()
+    main_hub.sender_task = Threads.@spawn send_worker()
+    atexit(clear_queue)
     bind(main_hub.queued_tasks, main_hub.sender_task)
     main_hub.initialised = true
 
     return nothing
+end
+
+@testitem "init" setup=[FakeSentry] begin
+    @test Sentry.main_hub.shutdown_timeout == FakeSentry.shutdown_timeout
+
+    # Re-initialising must not disturb the running hub.
+    @test_warn "Sentry already initialised." Sentry.init("http://cafe@127.0.0.1:1/99")
+    @test Sentry.main_hub.dsn == FakeSentry.dsn
 end
 
 function parse_dsn(dsn)
@@ -166,10 +175,12 @@ function PrepareBody(event::Event, buf)
     println(buf, JSON.json(item_header))
     println(buf, item_str)
 
-    for attachment in event.attachments
+    for (i, attachment) in enumerate(event.attachments)
         attachment_str = JSON.json((;data=attachment))
+        # `filename` is required by sentry for attachment items.
         attachment_header = (; type="attachment",
                              length=sizeof(attachment_str),
+                             filename="attachment-$i.json",
                              content_type="application/json")
 
         println(buf, JSON.json(attachment_header))
@@ -222,6 +233,7 @@ function PrepareBody(transaction::Transaction, buf)
             # root_span...,
             root_span.start_timestamp,
             root_span.timestamp,
+            main_hub.release,
             tags = MergeTags(global_tags, root_span.tags),
 
             contexts = (; trace),
@@ -231,7 +243,7 @@ function PrepareBody(transaction::Transaction, buf)
 
     item_header = (; type="transaction",
                    content_type="application/json",
-                   length=sizeof(item_str)+1) # +1 for the newline to come
+                   length=sizeof(item_str))
 
 
     println(buf, JSON.json(envelope_header))
@@ -262,7 +274,7 @@ function send_envelope(task::TaskPayload)
     if main_hub.dsn === "fake"
         body = String(transcode(CodecZlib.GzipDecompressor, body))
         lines = map(eachline(IOBuffer(body))) do line
-            line = JSON.Parser.parse(line)
+            line = JSON.parse(line)
             line = JSON.json(line, 4)
         end
         @info "Would have sent this body"
@@ -271,18 +283,30 @@ function send_envelope(task::TaskPayload)
     end
     r = HTTP.request("POST", target, headers, body)
     if r.status == 200
-        return r.body
+        return Vector{UInt8}(r.body)
     else
-        throw(HTTP.Exceptions.StatusError(r.status, "POST", target, r))
+        throw(HTTP.Exceptions.StatusError(r.status, r))
     end
     return nothing
 end
 
+@testitem "fake dsn" setup=[FakeSentry] begin
+    # The fake dsn pretty prints the envelope instead of sending it.
+    dsn = Sentry.main_hub.dsn
+    Sentry.main_hub.dsn = "fake"
+    try
+        @test_logs (:info, "Would have sent this body") match_mode=:any Sentry.send_envelope(Sentry.Event(message=(; formatted="dry run")))
+    finally
+        Sentry.main_hub.dsn = dsn
+    end
+end
+
 function send_worker()
-    while true
+    # Iterating the channel drains whatever is still buffered once it has been
+    # closed, and then finishes, which is what lets clear_queue wait for the
+    # sends themselves to complete rather than just for the queue to empty.
+    for event in main_hub.queued_tasks
         try
-            event = take!(main_hub.queued_tasks)
-            yield()
             send_envelope(event)
         catch exc
             if main_hub.debug
@@ -294,10 +318,34 @@ function send_worker()
 end
 
 function clear_queue()
-    while isready(main_hub.queued_tasks)
-        @info "Waiting for queue to finish before closing"
-        # send_envelope(take!(main_hub.queued_tasks))
-        sleep(1)
+    close(main_hub.queued_tasks)
+    if timedwait(() -> istaskdone(main_hub.sender_task), main_hub.shutdown_timeout) === :timed_out
+        @warn "Timed out sending queued events to sentry"
+    end
+end
+
+@testitem "flushing on exit" setup=[FakeSentry] begin
+    # Needs a real process exit to run the atexit handler, and deliberately
+    # does not wait for the send itself. The response is delayed so that
+    # just emptying the queue is not enough to get the event through.
+    code = """
+        using Sentry
+        Sentry.init("$(FakeSentry.dsn)"; shutdown_timeout=60.0)
+        capture_message("sent while exiting")
+        """
+
+    FakeSentry.reset!()
+    FakeSentry.response_delay[] = 3.0
+    try
+        elapsed = @elapsed run(`$(Base.julia_cmd()) --project=$(Base.active_project()) --eval $code`)
+
+        # Exiting has to block until the send itself came back
+        @test elapsed > FakeSentry.response_delay[]
+
+        parsed, _ = FakeSentry.next_envelope()
+        @test parsed[3]["message"]["formatted"] == "sent while exiting"
+    finally
+        FakeSentry.response_delay[] = 0.0
     end
 end
 
@@ -308,7 +356,19 @@ end
 function capture_event(task::TaskPayload)
     main_hub.initialised || return
 
-    push!(main_hub.queued_tasks, task)
+    try
+        push!(main_hub.queued_tasks, task)
+    catch exc
+        if !(exc isa InvalidStateException)
+            rethrow()
+        end
+
+        # The queue is closed while shutting down, so there is nothing left to
+        # send it to. Never let that propagate into the calling program.
+        if main_hub.debug
+            @error "Could not queue an event for sentry" exc
+        end
+    end
 end
 
 function capture_message(message, level::LogLevel=Info ; kwds...)
@@ -329,37 +389,48 @@ function capture_message(message, level::String ; tags=nothing, attachments::Vec
                         tags))
 end
 
-@testitem "capture_message levels" begin
-    old_init = Sentry.main_hub.initialised
-    Sentry.main_hub.initialised = true
-    while isready(Sentry.main_hub.queued_tasks)
-        take!(Sentry.main_hub.queued_tasks)
+@testitem "capture_message" setup=[FakeSentry] begin
+    FakeSentry.reset!()
+    set_tag("test", "message")
+
+    capture_message("hello", Warn; attachments=[(; command="ls")])
+    parsed, items = FakeSentry.next_envelope()
+    _, event_header, event, attachment_header, attachment = parsed
+
+    @test event_header["type"] == "event"
+    @test event["level"] == "warning"
+    @test event["message"]["formatted"] == "hello"
+    @test event["release"] == "v1.2.3"
+    @test event["tags"]["test"] == "message"
+
+    # A declared length must not include the newline separating the items.
+    @test event_header["length"] == sizeof(items[3])
+    @test attachment_header["length"] == sizeof(items[5])
+
+    @test attachment_header["type"] == "attachment"
+    @test attachment_header["filename"] == "attachment-1.json"
+    @test attachment["data"]["command"] == "ls"
+end
+
+@testitem "capture_message levels" setup=[FakeSentry] begin
+    FakeSentry.reset!()
+
+    for (level, expected) in ((Warn, "warning"), (Info, "info"), (Error, "error"))
+        capture_message("test", level)
+        parsed, _ = FakeSentry.next_envelope()
+        @test parsed[3]["level"] == expected
     end
 
-    capture_message("test", Warn)
-    ev = take!(Sentry.main_hub.queued_tasks)
-    @test ev isa Sentry.Event
-    @test ev.level == "warning"
-
-    capture_message("test", Info)
-    ev = take!(Sentry.main_hub.queued_tasks)
-    @test ev.level == "info"
-
-    capture_message("test", Error)
-    ev = take!(Sentry.main_hub.queued_tasks)
-    @test ev.level == "error"
-
+    # A level can also be given as the string sentry itself uses.
     capture_message("hello", "debug")
-    ev = take!(Sentry.main_hub.queued_tasks)
-    @test ev.message.formatted == "hello"
-    @test ev.level == "debug"
-
-    Sentry.main_hub.initialised = old_init
+    parsed, _ = FakeSentry.next_envelope()
+    @test parsed[3]["message"]["formatted"] == "hello"
+    @test parsed[3]["level"] == "debug"
 end
 
 # This assumes that we are calling from within a catch
 capture_exception(exc::Exception) = capture_exception([(exc, catch_backtrace())])
-function capture_exception(exceptions=catch_stack())
+function capture_exception(exceptions=Base.current_exceptions())
     main_hub.initialised || return
 
     formatted_excs = map(exceptions) do (exc,strace)
@@ -380,35 +451,32 @@ function capture_exception(exceptions=catch_stack())
                         level="error"))
 end
 
-@testitem "capture_exception" begin
-    old_init = Sentry.main_hub.initialised
-    Sentry.main_hub.initialised = true
-    while isready(Sentry.main_hub.queued_tasks)
-        take!(Sentry.main_hub.queued_tasks)
-    end
+@testitem "capture_exception" setup=[FakeSentry] begin
+    FakeSentry.reset!()
 
     try
-        error("test error")
+        error("boom")
     catch exc
         capture_exception(exc)
     end
+    parsed, _ = FakeSentry.next_envelope()
+    @test parsed[3]["level"] == "error"
+    exception = parsed[3]["exception"]["values"][1]
+    @test exception["type"] == "ErrorException"
+    @test exception["value"] == "boom"
+    @test !isempty(exception["stacktrace"]["frames"])
 
-    ev = take!(Sentry.main_hub.queued_tasks)
-    @test ev isa Sentry.Event
-    @test ev.level == "error"
-    @test !isempty(ev.exception.values)
-    exc_info = ev.exception.values[1]
-    @test exc_info[:type] == :ErrorException
-    @test exc_info[:value] == "test error"
-    @test haskey(exc_info, :stacktrace)
-    @test !isempty(exc_info[:stacktrace].frames)
-
-    Sentry.main_hub.initialised = old_init
+    # The zero argument method reads the current exception stack.
+    try
+        error("implicit boom")
+    catch
+        capture_exception()
+    end
+    parsed, _ = FakeSentry.next_envelope()
+    @test parsed[3]["exception"]["values"][1]["value"] == "implicit boom"
 end
 
 @testitem "Sentry.jl" begin
-    Sentry.init()
-
     @test Sentry.parse_dsn("fake") == (upstream = "", project_id = "", public_key = "")
     @test_throws ErrorException Sentry.parse_dsn("https://0000000000000000000000000000000000000000.ingest.sentry.io/0000000")
     @test Sentry.parse_dsn("https://abcdef1234567890@a12345.us.sentry.io/1234567890123456789") == (upstream = "https://a12345.us.sentry.io", project_id = "1234567890123456789", public_key = "abcdef1234567890")
