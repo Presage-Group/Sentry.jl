@@ -7,6 +7,7 @@ using JSON
 using Logging
 using PkgVersion
 using UUIDs
+using TestItems
 
 include("structs.jl")
 include("transactions.jl")
@@ -98,6 +99,13 @@ end
 
 # Need to have an extra Z at the end - this indicates UTC
 nowstr() = string(now(UTC)) * "Z" # COV_EXCL_LINE
+
+@testitem "nowstr" begin
+    s = Sentry.nowstr()
+    @test s isa String
+    @test endswith(s, "Z")
+    @test length(s) > 1
+end
 
 # Useful util
 macro ignore_exception(ex)
@@ -321,6 +329,34 @@ function capture_message(message, level::String ; tags=nothing, attachments::Vec
                         tags))
 end
 
+@testitem "capture_message levels" begin
+    old_init = Sentry.main_hub.initialised
+    Sentry.main_hub.initialised = true
+    while isready(Sentry.main_hub.queued_tasks)
+        take!(Sentry.main_hub.queued_tasks)
+    end
+
+    capture_message("test", Warn)
+    ev = take!(Sentry.main_hub.queued_tasks)
+    @test ev isa Sentry.Event
+    @test ev.level == "warning"
+
+    capture_message("test", Info)
+    ev = take!(Sentry.main_hub.queued_tasks)
+    @test ev.level == "info"
+
+    capture_message("test", Error)
+    ev = take!(Sentry.main_hub.queued_tasks)
+    @test ev.level == "error"
+
+    capture_message("hello", "debug")
+    ev = take!(Sentry.main_hub.queued_tasks)
+    @test ev.message.formatted == "hello"
+    @test ev.level == "debug"
+
+    Sentry.main_hub.initialised = old_init
+end
+
 # This assumes that we are calling from within a catch
 capture_exception(exc::Exception) = capture_exception([(exc, catch_backtrace())])
 function capture_exception(exceptions=catch_stack())
@@ -344,4 +380,61 @@ function capture_exception(exceptions=catch_stack())
                         level="error"))
 end
 
+@testitem "capture_exception" begin
+    old_init = Sentry.main_hub.initialised
+    Sentry.main_hub.initialised = true
+    while isready(Sentry.main_hub.queued_tasks)
+        take!(Sentry.main_hub.queued_tasks)
+    end
+
+    try
+        error("test error")
+    catch exc
+        capture_exception(exc)
+    end
+
+    ev = take!(Sentry.main_hub.queued_tasks)
+    @test ev isa Sentry.Event
+    @test ev.level == "error"
+    @test !isempty(ev.exception.values)
+    exc_info = ev.exception.values[1]
+    @test exc_info[:type] == :ErrorException
+    @test exc_info[:value] == "test error"
+    @test haskey(exc_info, :stacktrace)
+    @test !isempty(exc_info[:stacktrace].frames)
+
+    Sentry.main_hub.initialised = old_init
 end
+
+@testitem "Sentry.jl" begin
+    Sentry.init()
+
+    @test Sentry.parse_dsn("fake") == (upstream = "", project_id = "", public_key = "")
+    @test_throws ErrorException Sentry.parse_dsn("https://0000000000000000000000000000000000000000.ingest.sentry.io/0000000")
+    @test Sentry.parse_dsn("https://abcdef1234567890@a12345.us.sentry.io/1234567890123456789") == (upstream = "https://a12345.us.sentry.io", project_id = "1234567890123456789", public_key = "abcdef1234567890")
+
+    set_tag("test", "message")
+    @test Sentry.global_tags["test"] == "message"
+    @test_warn "A 'release' tag is ignored by sentry upstream. You should instead set the release in the `init` call" set_tag("release", "v1.0")
+    @test Sentry.global_tags["release"] == "v1.0"
+
+    @test length(Sentry.generate_uuid4()) == 32
+    @test all(c -> c in '0':'9' || c in 'a':'f', Sentry.generate_uuid4())
+
+    d = Sentry.FilterNothings([1, nothing, 2])
+    @test d[3] == 2
+    @test d[1] == 1
+
+    @test Sentry.MergeTags() === nothing
+    @test Sentry.MergeTags(nothing) === nothing
+    @test Sentry.MergeTags(nothing, nothing) === nothing
+    @test Sentry.MergeTags(Dict{String,String}()) === nothing
+    merged = Sentry.MergeTags(Dict("a" => "1"), Dict("b" => "2"))
+    @test merged["a"] == "1"
+    @test merged["b"] == "2"
+    @test Sentry.MergeTags(Dict("a" => "1"), Dict("a" => "2"))["a"] == "2"
+    @test Sentry.MergeTags(Dict("x" => "1"), nothing)["x"] == "1"
+end
+
+end
+

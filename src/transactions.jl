@@ -129,3 +129,63 @@ function complete(span::Span)
     end
     nothing
 end
+
+@testitem "Span completion" begin
+    span = Sentry.Span()
+    @test span.timestamp === nothing
+    Sentry.complete(span)
+    @test span.timestamp isa String
+
+    old_debug = Sentry.main_hub.debug
+    Sentry.main_hub.debug = true
+    @test_warn "Span attempted to be completed twice" Sentry.complete(span)
+    Sentry.main_hub.debug = old_debug
+end
+
+@testitem "Transaction lifecycle" begin
+    old_init = Sentry.main_hub.initialised
+    old_sampler = Sentry.main_hub.traces_sampler
+    Sentry.main_hub.initialised = true
+    Sentry.main_hub.traces_sampler = Sentry.RatioSampler(1.0)
+    delete!(task_local_storage(), :sentry_transaction)
+
+    @test Sentry.finish_transaction(nothing) === nothing
+    @test Sentry.finish_transaction(Sentry.InhibitTransaction()) === nothing
+
+    Sentry.main_hub.initialised = false
+    @test Sentry.start_transaction(name="uninit") === nothing
+    Sentry.main_hub.initialised = true
+
+    result = start_transaction(name="test_tx") do t
+        @test t.transaction.name == "test_tx"
+        @test t.span === t.transaction.root_span
+        @test t.transaction.num_open_spans == 1
+        :done
+    end
+    @test result == :done
+
+    Sentry.main_hub.initialised = old_init
+    Sentry.main_hub.traces_sampler = old_sampler
+end
+
+@testitem "Nested spans" begin
+    old_init = Sentry.main_hub.initialised
+    old_sampler = Sentry.main_hub.traces_sampler
+    Sentry.main_hub.initialised = true
+    Sentry.main_hub.traces_sampler = Sentry.RatioSampler(1.0)
+    delete!(task_local_storage(), :sentry_transaction)
+    delete!(task_local_storage(), :sentry_parent_span)
+
+    start_transaction(name="outer") do outer
+        start_transaction(op="child") do inner
+            @test inner.transaction === outer.transaction
+            @test inner.span.parent_span_id == outer.span.span_id
+            @test inner.transaction.num_open_spans == 2
+        end
+        @test outer.transaction.num_open_spans == 1
+        @test length(outer.transaction.spans) == 1
+    end
+
+    Sentry.main_hub.initialised = old_init
+    Sentry.main_hub.traces_sampler = old_sampler
+end
