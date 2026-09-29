@@ -1,7 +1,7 @@
 name = "Sentry"
 uuid = "22473447-a6cd-4572-bdc6-902d1f188b6a"
-authors = ["Randall Boyes <33524191+rdboyes@users.noreply.github.com> and contributors"]
 version = "0.2.1"
+authors = ["Randall Boyes <33524191+rdboyes@users.noreply.github.com> and contributors"]
 
 [deps]
 CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
@@ -10,6 +10,8 @@ HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
 PkgVersion = "eebad327-c553-4316-9ea0-9fa01ccd7688"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+TestItems = "1c621080-faea-4a02-84b6-bbd5e436b8fe"
 UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [compat]
@@ -19,6 +21,8 @@ HTTP = "2"
 JSON = "1.1"
 Logging = "1.10"
 PkgVersion = "0.3.3"
+Test = "1"
+TestItems = "1.0.0"
 UUIDs = "1.10"
 julia = "1.10"
 
