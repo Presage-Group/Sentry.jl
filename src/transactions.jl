@@ -58,6 +58,38 @@ function finish_transaction(inhibit::InhibitTransaction)
     end
     nothing
 end
+
+@testitem "inhibited transactions" setup=[FakeSentry] begin
+    FakeSentry.reset!()
+
+    # An inhibited transaction must not lock out tracing for the rest of the
+    # task, so run this in its own task to keep the check honest. The
+    # results are collected because the task has its own testset state.
+    results = fetch(@async begin
+        inhibited = start_transaction(trace_id=nothing)
+        nested = start_transaction(op="nested")
+
+        finish_transaction(inhibited)
+        after_nested = task_local_storage(:sentry_transaction)
+        finish_transaction(inhibited)
+        after_outer = task_local_storage(:sentry_transaction)
+
+        # Tracing works again now that the inhibition has been undone.
+        t = start_transaction(name="after")
+        finish_transaction(t)
+
+        (; inhibited, nested, after_nested, after_outer, t)
+    end)
+
+    @test results.inhibited isa Sentry.InhibitTransaction
+    @test results.nested === results.inhibited
+    @test results.after_nested === results.inhibited
+    @test results.after_outer === nothing
+    @test results.t.transaction isa Sentry.Transaction
+
+    parsed, _ = FakeSentry.next_envelope()
+    @test parsed[3]["transaction"] == "after"
+end
 function finish_transaction((transaction, parent_span, span))
     complete(span)
     if transaction.root_span !== span
@@ -138,4 +170,86 @@ function complete(span::Span)
         span.timestamp = nowstr()
     end
     nothing
+end
+
+@testitem "Span completion" begin
+    span = Sentry.Span()
+    @test span.timestamp === nothing
+    Sentry.complete(span)
+    @test span.timestamp isa String
+
+    old_debug = Sentry.main_hub.debug
+    Sentry.main_hub.debug = true
+    @test_warn "Span attempted to be completed twice" Sentry.complete(span)
+    Sentry.main_hub.debug = old_debug
+end
+
+@testitem "Transaction lifecycle" begin
+    old_init = Sentry.main_hub.initialised
+    old_sampler = Sentry.main_hub.traces_sampler
+    Sentry.main_hub.initialised = true
+    Sentry.main_hub.traces_sampler = Sentry.RatioSampler(1.0)
+    delete!(task_local_storage(), :sentry_transaction)
+
+    @test Sentry.finish_transaction(nothing) === nothing
+    @test Sentry.finish_transaction(Sentry.InhibitTransaction()) === nothing
+
+    Sentry.main_hub.initialised = false
+    @test Sentry.start_transaction(name="uninit") === nothing
+    Sentry.main_hub.initialised = true
+
+    result = start_transaction(name="test_tx") do t
+        @test t.transaction.name == "test_tx"
+        @test t.span === t.transaction.root_span
+        @test t.transaction.num_open_spans == 1
+        :done
+    end
+    @test result == :done
+
+    Sentry.main_hub.initialised = old_init
+    Sentry.main_hub.traces_sampler = old_sampler
+end
+
+@testitem "Nested spans" begin
+    old_init = Sentry.main_hub.initialised
+    old_sampler = Sentry.main_hub.traces_sampler
+    Sentry.main_hub.initialised = true
+    Sentry.main_hub.traces_sampler = Sentry.RatioSampler(1.0)
+    delete!(task_local_storage(), :sentry_transaction)
+    delete!(task_local_storage(), :sentry_parent_span)
+
+    start_transaction(name="outer") do outer
+        start_transaction(op="child") do inner
+            @test inner.transaction === outer.transaction
+            @test inner.span.parent_span_id == outer.span.span_id
+            @test inner.transaction.num_open_spans == 2
+        end
+        @test outer.transaction.num_open_spans == 1
+        @test length(outer.transaction.spans) == 1
+    end
+
+    Sentry.main_hub.initialised = old_init
+    Sentry.main_hub.traces_sampler = old_sampler
+end
+
+@testitem "transaction envelope" setup=[FakeSentry] begin
+    FakeSentry.reset!()
+
+    start_transaction(name="job", op="task") do _
+        start_transaction(op="child", description="inner") do _ end
+    end
+
+    parsed, items = FakeSentry.next_envelope()
+    _, header, transaction = parsed
+
+    @test header["type"] == "transaction"
+    @test header["length"] == sizeof(items[3])
+    @test transaction["transaction"] == "job"
+    @test transaction["release"] == "v1.2.3"
+
+    trace = transaction["contexts"]["trace"]
+    @test trace["op"] == "task"
+    @test length(transaction["spans"]) == 1
+    @test transaction["spans"][1]["parent_span_id"] == trace["span_id"]
+    @test transaction["spans"][1]["trace_id"] == trace["trace_id"]
 end

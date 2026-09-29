@@ -52,6 +52,33 @@ sample(::NoSamples) = false
 sample(sampler::RatioSampler) = rand() < sampler.ratio
 sample(sampler::Function) = sampler()
 
+@testitem "Sampling" begin
+    @test Sentry.sample(Sentry.NoSamples()) == false
+
+    @test_throws AssertionError Sentry.RatioSampler(-0.1)
+    @test_throws AssertionError Sentry.RatioSampler(1.1)
+    @test Sentry.RatioSampler(0.0).ratio == 0.0
+    @test Sentry.RatioSampler(1.0).ratio == 1.0
+    @test Sentry.sample(Sentry.RatioSampler(0.0)) == false
+    @test Sentry.sample(Sentry.RatioSampler(1.0)) == true
+
+    @test Sentry.sample(() -> true) == true
+    @test Sentry.sample(() -> false) == false
+end
+
+@testitem "Event and Span defaults" begin
+    ev = Sentry.Event()
+    @test length(ev.event_id) == 32
+    @test ev.platform == "julia"
+    @test isempty(ev.attachments)
+    @test ev.message === nothing
+
+    sp = Sentry.Span()
+    @test length(sp.span_id) == 16
+    @test sp.timestamp === nothing
+    @test sp.parent_span_id === nothing
+end
+
 const TaskPayload = Union{Event,Transaction}
 
 # Seconds to wait for queued events to be sent while the program is exiting
@@ -77,4 +104,9 @@ Base.@kwdef mutable struct Hub
     last_send_time = nothing
     queued_tasks = Channel{TaskPayload}(100)
     sender_task = nothing
+end
+
+@testitem "Hub defaults" begin
+    @test Sentry.Hub().initialised == false
+    @test Sentry.Hub().shutdown_timeout == Sentry.DEFAULT_SHUTDOWN_TIMEOUT
 end
