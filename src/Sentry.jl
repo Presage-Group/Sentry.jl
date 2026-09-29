@@ -321,7 +321,7 @@ function send_envelope(task::TaskPayload)
     if r.status == 200
         return Vector{UInt8}(r.body)
     else
-        throw(HTTP.Exceptions.StatusError(r.status, r))
+        throw(HTTP.StatusError(r.status, r))
     end
 end
 
