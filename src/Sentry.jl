@@ -79,6 +79,29 @@ end
     @test Sentry.main_hub.dsn == FakeSentry.dsn
 end
 
+@testitem "init without an explicit dsn" begin
+    # `init` only does its work once per process and the shared hub is already
+    # initialised, so the dsn fallbacks need a process of their own.
+    code = """
+        using Sentry, Test
+
+        delete!(ENV, "SENTRY_DSN")
+        @test_warn "No DSN for Sentry.jl" Sentry.init()
+        @test Sentry.main_hub.initialised == false
+
+        # Falls back to the environment, and takes a sampler object as given.
+        ENV["SENTRY_DSN"] = "fake"
+        sampler = () -> false
+        Sentry.init(; traces_sampler=sampler)
+        @test Sentry.main_hub.initialised
+        @test Sentry.main_hub.dsn == "fake"
+        @test Sentry.main_hub.traces_sampler === sampler
+        """
+
+    cmd = `$(Base.julia_cmd()) --project=$(Base.active_project()) --eval $code`
+    @test success(pipeline(cmd, stdout=stdout, stderr=stderr))
+end
+
 function parse_dsn(dsn)
     dsn == "fake" && return (; upstream="", project_id="", public_key="")
 
@@ -252,6 +275,19 @@ function PrepareBody(transaction::Transaction, buf)
     nothing
 end
 
+@testitem "incomplete spans warn in debug mode" begin
+    transaction = Sentry.Transaction(name="job", root_span=Sentry.Span(timestamp=Sentry.nowstr()))
+    push!(transaction.spans, Sentry.Span())  # deliberately never completed
+
+    old_debug = Sentry.main_hub.debug
+    Sentry.main_hub.debug = true
+    try
+        @test_warn "complete before the transaction completed" Sentry.PrepareBody(transaction, PipeBuffer())
+    finally
+        Sentry.main_hub.debug = old_debug
+    end
+end
+
 # The envelope version
 function send_envelope(task::TaskPayload)
     target = "$(main_hub.upstream)/api/$(main_hub.project_id)/envelope/"
@@ -287,17 +323,30 @@ function send_envelope(task::TaskPayload)
     else
         throw(HTTP.Exceptions.StatusError(r.status, r))
     end
-    return nothing
 end
 
 @testitem "fake dsn" setup=[FakeSentry] begin
     # The fake dsn pretty prints the envelope instead of sending it.
     dsn = Sentry.main_hub.dsn
+    old_debug = Sentry.main_hub.debug
     Sentry.main_hub.dsn = "fake"
+    Sentry.main_hub.debug = true
     try
-        @test_logs (:info, "Would have sent this body") match_mode=:any Sentry.send_envelope(Sentry.Event(message=(; formatted="dry run")))
+        @test_logs (:info, "Sending HTTP request") (:info, "Would have sent this body") match_mode=:any Sentry.send_envelope(Sentry.Event(message=(; formatted="dry run")))
     finally
         Sentry.main_hub.dsn = dsn
+        Sentry.main_hub.debug = old_debug
+    end
+end
+
+@testitem "only 200 counts as sent" setup=[FakeSentry] begin
+    # HTTP raises on a failure status itself, so a success status that sentry
+    # would never send is what reaches the check in send_envelope.
+    FakeSentry.response_status[] = 202
+    try
+        @test_throws Sentry.HTTP.StatusError Sentry.send_envelope(Sentry.Event(message=(; formatted="accepted")))
+    finally
+        FakeSentry.response_status[] = 200
     end
 end
 
@@ -314,6 +363,30 @@ function send_worker()
                 showerror(stderr, exc, catch_backtrace())
             end
         end
+    end
+end
+
+@testitem "a failed send does not kill the worker" setup=[FakeSentry] begin
+    old_debug = Sentry.main_hub.debug
+    Sentry.main_hub.debug = true
+    FakeSentry.response_status[] = 202
+    try
+        FakeSentry.reset!()
+        capture_message("rejected")
+        parsed, _ = FakeSentry.next_envelope()
+        @test parsed[3]["message"]["formatted"] == "rejected"
+
+        # Waiting for a second envelope proves the worker got past the error,
+        # because it sends one event at a time.
+        FakeSentry.response_status[] = 200
+        FakeSentry.reset!()
+        capture_message("after the failure")
+        parsed, _ = FakeSentry.next_envelope()
+        @test parsed[3]["message"]["formatted"] == "after the failure"
+        @test !istaskdone(Sentry.main_hub.sender_task)
+    finally
+        FakeSentry.response_status[] = 200
+        Sentry.main_hub.debug = old_debug
     end
 end
 
@@ -349,6 +422,26 @@ end
     end
 end
 
+@testitem "giving up on a stuck sender" setup=[FakeSentry] begin
+    # Stands in a queue and a sender of its own, because clear_queue closes the
+    # queue it is given and the real one has to survive for the other test items.
+    hub = Sentry.main_hub
+    old_queue, old_task, old_timeout = hub.queued_tasks, hub.sender_task, hub.shutdown_timeout
+    blocked = Channel{Nothing}(0)
+    hub.queued_tasks = Channel{Sentry.TaskPayload}(1)
+    hub.sender_task = Threads.@spawn try
+        wait(blocked)
+    catch
+    end
+    hub.shutdown_timeout = 0.2
+    try
+        @test_logs (:warn, "Timed out sending queued events to sentry") Sentry.clear_queue()
+    finally
+        close(blocked)
+        hub.queued_tasks, hub.sender_task, hub.shutdown_timeout = old_queue, old_task, old_timeout
+    end
+end
+
 ####################################
 # * Basic capturing
 #----------------------------------
@@ -368,6 +461,25 @@ function capture_event(task::TaskPayload)
         if main_hub.debug
             @error "Could not queue an event for sentry" exc
         end
+    end
+end
+
+@testitem "queueing failures" setup=[FakeSentry] begin
+    hub = Sentry.main_hub
+    old_queue, old_debug = hub.queued_tasks, hub.debug
+    try
+        # A closed queue is what shutting down looks like: the event is dropped
+        # rather than thrown at the calling program, and debug mode says so.
+        hub.queued_tasks = Channel{Sentry.TaskPayload}(1)
+        close(hub.queued_tasks)
+        hub.debug = true
+        @test_logs (:error, "Could not queue an event for sentry") capture_message("dropped")
+
+        # Anything else is a real bug and must not be swallowed.
+        hub.queued_tasks = 0
+        @test_throws MethodError capture_message("broken")
+    finally
+        hub.queued_tasks, hub.debug = old_queue, old_debug
     end
 end
 

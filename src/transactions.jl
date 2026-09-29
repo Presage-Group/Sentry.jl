@@ -144,6 +144,31 @@ function get_transaction(; force_new=false, trace_id=:auto, kwds...)
     end
 end
 
+@testitem "a declined sample inhibits the transaction" setup=[FakeSentry] begin
+    old_sampler = Sentry.main_hub.traces_sampler
+    Sentry.main_hub.traces_sampler = Sentry.NoSamples()
+    try
+        # In a task of its own, so the inhibition cannot leak into other test items.
+        inhibited = fetch(@async start_transaction(name="declined"))
+        @test inhibited isa Sentry.InhibitTransaction
+        @test inhibited.num_open_spans == 1
+    finally
+        Sentry.main_hub.traces_sampler = old_sampler
+    end
+end
+
+@testitem "a new trace id inside an open transaction warns" setup=[FakeSentry] begin
+    old_debug = Sentry.main_hub.debug
+    Sentry.main_hub.debug = true
+    try
+        start_transaction(name="outer") do _
+            @test_warn "new trace id" start_transaction(trace_id="0"^32) do _ end
+        end
+    finally
+        Sentry.main_hub.debug = old_debug
+    end
+end
+
 set_task_transaction(::Nothing) = nothing
 function set_task_transaction(::InhibitTransaction)
     # Starts at 1 with no matching finish, so that the parent's sampling
@@ -154,6 +179,30 @@ function set_task_transaction((transaction, ignored, parent_span))
     task_local_storage(:sentry_transaction, transaction)
     task_local_storage(:sentry_parent_span, parent_span)
     nothing
+end
+
+@testitem "set_task_transaction" setup=[FakeSentry] begin
+    @test set_task_transaction(nothing) === nothing
+
+    # An inhibited parent has to stop the new task from tracing as well. The
+    # results are collected because the task has its own testset state.
+    inherited = fetch(@async begin
+        set_task_transaction(Sentry.InhibitTransaction(3))
+        task_local_storage(:sentry_transaction)
+    end)
+    @test inherited isa Sentry.InhibitTransaction
+    # One open span with no matching finish, so it lasts the life of the task.
+    @test inherited.num_open_spans == 1
+
+    # A traced parent hands the new task its current span to hang spans off.
+    start_transaction(name="outer") do current
+        inherited = fetch(@async begin
+            set_task_transaction(current)
+            (task_local_storage(:sentry_transaction), task_local_storage(:sentry_parent_span))
+        end)
+        @test inherited[1] === current.transaction
+        @test inherited[2] === current.span
+    end
 end
 
 

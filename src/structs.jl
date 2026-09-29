@@ -48,7 +48,7 @@ Base.@kwdef struct RatioSampler
     end
 end
 
-sample(::NoSamples) = false
+sample(::NoSamples) = false # COV_EXCL_LINE
 sample(sampler::RatioSampler) = rand() < sampler.ratio
 sample(sampler::Function) = sampler()
 
@@ -62,8 +62,8 @@ sample(sampler::Function) = sampler()
     @test Sentry.sample(Sentry.RatioSampler(0.0)) == false
     @test Sentry.sample(Sentry.RatioSampler(1.0)) == true
 
-    @test Sentry.sample(() -> true) == true
-    @test Sentry.sample(() -> false) == false
+    @test Sentry.sample(Returns(true)) == true
+    @test Sentry.sample(Returns(false)) == false
 end
 
 @testitem "Event and Span defaults" begin

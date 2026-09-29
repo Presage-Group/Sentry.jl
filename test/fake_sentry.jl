@@ -18,16 +18,20 @@ it with `@testitem "..." setup=[FakeSentry] begin ... end`.
     const GzipDecompressor = Sentry.CodecZlib.GzipDecompressor
 
     # Collects the envelopes that Sentry.jl would have sent to a real sentry server.
-    const received = Channel{String}(16)
+    const received = Channel{String}(256)
 
     # Delays the response, to emulate a sentry server that is slower than the local
     # one. Nothing is recorded if the client gives up in the meantime.
     const response_delay = Ref(0.0)
 
+    # Lets a test see what Sentry.jl makes of a status other than 200. HTTP
+    # raises on a failure status by itself, so only another 2xx is useful here.
+    const response_status = Ref(200)
+
     const server = HTTP.serve!("127.0.0.1", 0; listenany=true) do request
         sleep(response_delay[])
         put!(received, String(transcode(GzipDecompressor, Vector{UInt8}(request.body))))
-        HTTP.Response(200, "ok")
+        HTTP.Response(response_status[], "ok")
     end
 
     const port = HTTP.port(server)
