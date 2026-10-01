@@ -5,3 +5,6 @@ scratch/
 .aider*
 .vscode
 .claude/
+docs/build/
+docs/Manifest*.toml
+*.cov

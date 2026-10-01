@@ -1,0 +1,9 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+Sentry = "22473447-a6cd-4572-bdc6-902d1f188b6a"
+
+[sources]
+Sentry = {path = ".."}
+
+[compat]
+Documenter = "1"

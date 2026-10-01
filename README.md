@@ -2,79 +2,73 @@
 
 [![Build Status](https://github.com/Presage-group/Sentry.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/Presage-group/Sentry.jl/actions/workflows/CI.yml?query=branch%3Amain)
 [![codecov](https://codecov.io/gh/Presage-Group/Sentry.jl/graph/badge.svg?token=O28SVV3R6F)](https://codecov.io/gh/Presage-Group/Sentry.jl)
+[![Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://presage-group.github.io/Sentry.jl/dev/)
 
-## Acknowledgement
+A [Sentry](https://sentry.io) SDK for Julia, with the features of the official
+SDKs: error monitoring, tracing, profiling, structured logs, metrics, release
+health and cron monitoring. Its API and options follow
+[sentry-python](https://github.com/getsentry/sentry-python).
 
-This is a update on [SentryIntegration.jl](https://github.com/synchronoustechnologies/SentryIntegration.jl) that works in modern julia without relying on unregistered packages. 
-
-## Basic Sentry Functionality
-
-The [Sentry Developer Documentation](https://develop.sentry.dev/sdk/overview/) states:
-
-> At its core an SDK is a set of utilities for capturing data about an exceptional state in an application. Given this data, it then builds and sends a JSON payload to the Sentry server.
-
-> The following items are expected of production-ready SDKs:
-
-> - DSN configuration
-> - Graceful failures (e.g. Sentry server is unreachable)
-> - Setting attributes (e.g. tags and extra data)
-> - Support for Linux, Windows and OS X (where applicable)
-
-### DSN Configuration
-
-Call `Sentry.init()` with the ENV variable `SENTRY_DSN` set to your DSN, or pass the DSN as a variable, as in: 
+## Quick start
 
 ```julia
-Sentry.init("https://0000000000000000000000000000000000000000.ingest.sentry.io/0000000")
-```
+using Sentry
 
-### Setting Attributes
+Sentry.init("https://<key>@o<org>.ingest.sentry.io/<project>";   # or set SENTRY_DSN
+            release="myapp@1.2.3",
+            traces_sample_rate=0.2)
 
-You can set tags using the `set_tag` function. 
+set_user((; id="42"))
+set_tag("customer", "acme")
 
-```julia
-Sentry.set_tag("customer", customer)
-Sentry.set_tag("release", string(VERSION))
-Sentry.set_tag("environment", get(ENV, "RUN_ENV", "unset"))
-```
-
-
-### Capturing Exceptional State
-
-Messages are sent out via `capture_exception` and `capture_message`:
-
-```julia
-# At a high level in your app/tasks (to catch as many unhandled exceptions as
-# possible)
 try
-    core_loop()
+    risky()
 catch exc
-    capture_exception(exc)
-    # Maybe rethrow here
+    capture_exception(exc)      # with the full exception chain and source context
+end
+
+capture_message("Something noteworthy happened", Warn)
+
+@error "Import failed" file=path  # log messages are captured too
+
+start_transaction(name="nightly-import", op="task") do txn
+    start_span(op="db.query", name="load rows") do span
+        load_rows()
+    end
 end
 ```
 
-You can control the priority level of the message using the second argument to `capture_message`: 
+Without a DSN, `init` does nothing and the other functions are cheap no-ops.
 
-```julia
-capture_message("Boring info message")
-capture_message("An external REST request was received for an API ($api_name) that is unknown",
-                Warn)
-capture_message("Should not have got here!", Error)
-```
+## Features
 
-Attachments can be included along with the message using the `attachments` argument: 
+- **Errors**: exception chains (including task failures, composite and remote
+  exceptions), in-app frames and source context, tags, users, contexts,
+  breadcrumbs, attachments, fingerprints, `before_send`, sampling,
+  `ignore_errors`, scrubbing of sensitive data.
+- **Scopes**: global, isolation and current scopes, inherited by tasks.
+- **Tracing**: transactions and spans, `@trace`, sampling (including by the
+  parent), distributed tracing with `sentry-trace`, `baggage` and W3C
+  `traceparent` headers, span streaming.
+- **Profiling**: transaction and continuous profiles, from Julia's sampling
+  profiler.
+- **Logs and metrics**: `Sentry.Logs` and `Sentry.Metrics`, and Julia's
+  logging (`@info`, `@error`) as breadcrumbs, events and logs.
+- **Release health**: application and request sessions, crashed sessions for
+  uncaught errors.
+- **Crons**: `Sentry.@monitor` and check-ins.
+- **Feature flags**: `add_feature_flag`.
+- **Integrations**: HTTP.jl clients and servers (and Oxygen.jl),
+  DBInterface.jl databases (SQLite, LibPQ, MySQL, ...), Distributed.jl, tasks,
+  cloud platforms, Spotlight.
+- **Transport**: gzip, rate limits, client reports, backpressure handling,
+  proxies and TLS settings, flushing at exit.
 
-```julia
-capture_message("Noticed an 'errors' field in the GQL REST return:",
-                Warn,
-                attachments=[(;command, response)])
-```
+See the [documentation](https://presage-group.github.io/Sentry.jl/dev/) for
+details, including a feature by feature comparison with sentry-python.
 
-### Graceful Failures
+## Acknowledgement
 
-Work in progress...
-
-### Supported Operating Systems
-
-Should work anywhere julia does!
+This started as an update of
+[SentryIntegration.jl](https://github.com/synchronoustechnologies/SentryIntegration.jl)
+that works in modern Julia without relying on unregistered packages.

@@ -1,7 +1,7 @@
 name = "Sentry"
 uuid = "22473447-a6cd-4572-bdc6-902d1f188b6a"
+version = "0.3.0"
 authors = ["Randall Boyes <33524191+rdboyes@users.noreply.github.com> and contributors"]
-version = "0.2.2"
 
 [deps]
 CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
@@ -10,24 +10,37 @@ HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
 PkgVersion = "eebad327-c553-4316-9ea0-9fa01ccd7688"
-Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Profile = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+ScopedValues = "7e506255-f358-4e82-b7e4-beb19740aa63"
 TestItems = "1c621080-faea-4a02-84b6-bbd5e436b8fe"
+URIs = "5c2747f8-b7ea-4ff2-ba2e-563bfd36b1d4"
 UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
+[weakdeps]
+DBInterface = "a10d1c49-ce27-4219-8d33-6db1a4562965"
+Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
+
+[extensions]
+SentryDBInterfaceExt = "DBInterface"
+SentryDistributedExt = "Distributed"
+
 [compat]
+DBInterface = "2.5"
+Distributed = "1.10"
 CodecZlib = "0.7.8"
 Dates = "1.10"
 HTTP = "2"
 JSON = "1.1"
 Logging = "1.10"
 PkgVersion = "0.3.3"
-Test = "1"
+Printf = "1.10"
+Profile = "1.10"
+Random = "1.10"
+ScopedValues = "1"
 TestItems = "1.0.0"
+URIs = "1"
 UUIDs = "1.10"
 julia = "1.10"
 
-[extras]
-Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
-
-[targets]
-test = ["Test"]
